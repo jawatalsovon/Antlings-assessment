@@ -5,7 +5,7 @@ A computer vision pipeline for analyzing drone/aerial imagery to detect humans a
 
 ---
 
-## Results at a Glance
+## Results
 
 | Metric | Value |
 |--------|-------|
@@ -13,17 +13,22 @@ A computer vision pipeline for analyzing drone/aerial imagery to detect humans a
 | mAP@0.5:0.95 | 0.1212 |
 | Precision | 0.5356 |
 | Recall | 0.2489 |
-| Inference Speed | ~2.3ms per image |
+| Inference Speed | ~2.3ms / image |
+| Hardware | AMD MI300X (192GB VRAM) |
 
-> Note: VisDrone is one of the hardest aerial detection benchmarks. State-of-the-art models achieve ~35–40% mAP@0.5. A 50-epoch YOLOv8n baseline achieving 20.3% is expected and competitive for this scale of training.
+> **Context:** VisDrone is one of the hardest aerial detection benchmarks due to extreme small object sizes and high density. State-of-the-art models achieve ~40% mAP@0.5 with 300+ epochs. Our 50-epoch YOLOv8n baseline achieving 20.3% is expected and competitive for this training scale.
 
 ---
 
-## Demo
+## Detection & Counting Output
 
-| Detection & Counting | Tracking |
-|----------------------|----------|
-| ![Detection Grid](outputs/task03_detection_grid.png) | ByteTrack tracking with trail lines and persistent IDs |
+![Detection Grid](antlings_output/task03_detection_grid.png)
+
+---
+
+## Evaluation Metrics
+
+![Metrics Dashboard](antlings_output/task05_metrics.png)
 
 ---
 
@@ -31,143 +36,133 @@ A computer vision pipeline for analyzing drone/aerial imagery to detect humans a
 
 ### Task 01 — Dataset Understanding & Preprocessing
 
-**Dataset:** VisDrone2019-DET — 10,209 drone images across 10 object classes captured at varying altitudes and viewpoints.
+**Dataset:** VisDrone2019-DET — 10,209 drone images across 10 object classes at varying altitudes.
 
-**Structure:**
-- `VisDrone2019-DET-train/` — 6,471 images
-- `VisDrone2019-DET-val/` — 548 images
-- `VisDrone2019-DET-test-dev/` — 1,610 images
+| Split | Images | Labels |
+|-------|--------|--------|
+| Train | 6,471 | 6,471 |
+| Val | 548 | 548 |
+| Test | 1,610 | 1,610 |
 
-**Classes used:**
-- Human = class 0 (pedestrian) + class 1 (people)
+**Class Mapping for This Task:**
+- Human = class 0 (pedestrian) + class 1 (people) — merged for complete count
 - Car = class 3
 
-The dataset was already pre-converted to YOLO format (normalized bounding box coordinates). No manual conversion was required.
+The dataset was pre-converted to YOLO format (normalized bounding box coordinates). No manual conversion required.
 
 **Key Challenges:**
-1. **Small objects** — humans appear as 10–30px blobs from altitude; over 60% of human annotations have area < 0.1% of the image
-2. **High density** — 100+ humans per frame causes heavy occlusion and NMS suppression issues
-3. **Class imbalance** — pedestrian class dominates heavily over others
-4. **Scale variation** — same object appears at vastly different sizes across images due to varying drone altitude
-5. **Viewpoint diversity** — top-down and oblique angles both present, requiring augmentation coverage
+
+| Challenge | Description | Solution |
+|-----------|-------------|----------|
+| Small objects | Humans appear as 10–30px blobs from altitude. >60% of annotations have area <0.1% of image | Mosaic augmentation, imgsz=640 |
+| High density | 100+ humans per frame, heavy occlusion | Lower NMS IoU threshold (0.45) |
+| Class imbalance | Pedestrian class dominates | Mosaic + copy-paste augmentation |
+| Scale variation | Same object at vastly different sizes | scale=0.5 augmentation |
+| Viewpoint diversity | Top-down and oblique angles | flipud=0.3 augmentation |
 
 ---
 
 ### Task 02 — Model Training
 
-**Model:** YOLOv8n (nano) fine-tuned from COCO pretrained weights
+**Model:** YOLOv8n fine-tuned from COCO pretrained weights on AMD MI300X via AMD Developer Cloud (ROCm 7.0)
 
-**Why YOLOv8?**
-- Real-time capable single-stage detector
-- Excellent small-object detection with mosaic augmentation
-- Ultralytics library provides clean training, inference, and tracking APIs
+**Why fine-tune, not train from scratch?** COCO pretrained weights already encode knowledge of edges, shapes, and objects. Fine-tuning adapts this to aerial drone views — faster convergence, better results.
 
-**Training Configuration:**
+**Why train on all 10 classes?** Richer feature representations benefit target class detection. We filter to human/car at inference only.
+
 ```
-Epochs:        50 (early stopping patience=15)
-Image size:    640×640
-Batch size:    16
-Optimizer:     AdamW (lr=0.001, weight_decay=0.0005)
-Hardware:      AMD MI300X GPU (192GB VRAM) via AMD Developer Cloud
+Epochs:     50 (early stopping, patience=15)
+Image size: 640x640
+Batch:      16
+Optimizer:  AdamW (lr=0.001)
 ```
-
-**Key Augmentations for Aerial Imagery:**
-| Augmentation | Value | Reason |
-|-------------|-------|--------|
-| Mosaic | 1.0 | Combines 4 images — increases density and scale variety |
-| Copy-paste | 0.1 | Redistributes rare classes |
-| Vertical flip | 0.3 | Makes sense for aerial view unlike ground cameras |
-| Rotation | 10° | Covers angled drone captures |
-| Scale | 0.5 | Simulates different altitudes |
-
-**Training Strategy:** Trained on all 10 VisDrone classes for richer feature learning, then filtered to human/car at inference time only.
 
 ---
 
 ### Task 03 — Human & Car Detection with Counting
 
-The detection pipeline:
-1. Image fed to trained YOLOv8n model
-2. Predictions filtered by confidence threshold (0.25) and NMS (IoU=0.45)
-3. Results filtered to human (class 0+1) and car (class 3)
-4. Human count and car count computed
-5. Bounding boxes drawn with OpenCV — green for humans, red for cars
-6. Count overlay panel displayed on image
+Detection pipeline:
+1. Image → YOLOv8n inference
+2. Filter to class 0+1 (human) and class 3 (car)
+3. Count detections per class
+4. Draw bounding boxes — green for human, red for car
+5. Overlay count panel on image
 
-**Sample Output:**
-
-![Detection Results](outputs/task03_detection_grid.png)
+Batch results across 50 test images saved to `antlings_output/counts.csv`.
 
 ---
 
 ### Task 04 — Object Tracking with ByteTrack *(Bonus)*
 
-Implemented ByteTrack via Ultralytics' built-in tracker:
-- Assigns persistent track IDs to each detected object across frames
-- Uses Kalman filtering to predict object positions between frames
-- Draws movement trail lines showing trajectory history
+ByteTrack assigns persistent IDs to detected objects across frames using IoU-based association and Kalman filtering for position prediction.
+
+**Why ByteTrack over DeepSORT?** ByteTrack associates all detections (including low-confidence) with existing tracks — more robust in dense aerial scenes without needing a re-identification model.
+
+Features implemented:
+- Persistent track IDs across frames
+- Movement trail visualization (last 20 positions)
 - Live per-frame human and car count overlay
 
-**Why ByteTrack over DeepSORT?**
-ByteTrack associates ALL detections (not just high-confidence ones) with existing tracks, making it more robust in dense aerial scenes without needing a re-identification model.
+> **Note:** Tracking was demonstrated on a sequence of test images assembled into a video rather than a real continuous drone feed. In real drone footage, ByteTrack maintains stable track IDs with much higher consistency due to true temporal continuity between frames.
 
 ---
 
 ### Task 05 — Evaluation & Visualization
 
-![Metrics Dashboard](outputs/task05_metrics.png)
-
-**Evaluation run on:** VisDrone2019-DET-val (548 images, 38,759 object annotations)
+**Validation set:** 548 images, 38,759 object annotations
 
 **Strengths:**
-- Fast inference (~2.3ms/image on MI300X) — viable for real-time drone deployment
-- Dual human class merging gives more complete human counts
-- Mosaic augmentation significantly helps small object recall
+- ~2.3ms inference per image on MI300X — real-time capable
+- Dual-class human merging gives more complete counts
+- Mosaic augmentation helps small object detection significantly
 
 **Limitations:**
-- YOLOv8n is the smallest variant — larger models (yolov8m/l) would push mAP significantly higher
-- 50 epochs is a baseline — SOTA VisDrone results require 300+ epochs
-- Frame-by-frame counting without track ID persistence may double-count in video
+- YOLOv8n is the smallest variant — larger models push mAP higher
+- 50 epochs is a baseline — SOTA requires 300+ epochs
+- Frame-level counting; unique person tracking requires track-ID persistence
 
-**Improvements for production:**
-- SAHI (Slicing Aided Hyper Inference) for better small object detection
-- Higher input resolution (1280px)
-- Track-ID-based unique person counting
+**Future Improvements:**
+- SAHI (Slicing Aided Hyper Inference) for small object recall
+- Higher input resolution (imgsz=1280)
+- YOLOv8m/l or RT-DETR for higher accuracy
+- Track-ID-based unique person counting for video
 
 ---
 
 ## Repository Structure
 
 ```
-├── notebook/
-│   └── CV.ipynb                  # Development notebook (full workflow)
-├── antlings_visdrone_v2.py        # Clean reference code
-├── outputs/
-│   ├── task03_detection_grid.png  # Detection results grid
-│   ├── task03_result_1-6.jpg      # Individual detection outputs
-│   ├── task04_tracked.mp4         # ByteTrack tracking video
-│   ├── task05_metrics.png         # Evaluation metrics dashboard
-│   └── counts.csv                 # Batch inference human/car counts
+antlings-assessment/
+├── notebooks/
+│   └── antlings_assessment_clean.ipynb   # Clean organised notebook
 ├── runs/
-│   └── detect/                    # Training artifacts (weights, curves)
+│   └── weights/
+│       ├── best.pt                        # Best trained model weights
+│       └── last.pt
+├── antlings_output/
+│   ├── best.pt                            # Model weights copy
+│   ├── counts.csv                         # Batch inference results
+│   ├── task03_detection_grid.png
+│   ├── task03_result_1-6.jpg
+│   ├── task04_tracked.mp4                 # ByteTrack tracking video
+│   └── task05_metrics.png
+├── antlings_visdrone_v2.py                # Clean reference code
 └── README.md
 ```
 
 ---
 
-## Setup & Reproduction
+## Reproduce
 
-```bash
-# Install dependencies
+```python
 pip install ultralytics kagglehub
 
-# Download dataset
-python -c "import kagglehub; kagglehub.dataset_download('banuprasadb/visdrone-dataset')"
+import kagglehub
+path = kagglehub.dataset_download("banuprasadb/visdrone-dataset")
 
-# Run inference with trained weights
 from ultralytics import YOLO
-model = YOLO('runs/detect/weights/best.pt')
-results = model.predict('your_image.jpg', conf=0.25)
+model = YOLO("runs/weights/best.pt")
+results = model.predict("your_image.jpg", conf=0.25)
 ```
 
 ---
@@ -177,11 +172,11 @@ results = model.predict('your_image.jpg', conf=0.25)
 | Tool | Purpose |
 |------|---------|
 | YOLOv8 (Ultralytics) | Object detection & tracking |
-| PyTorch + ROCm 7.0 | Deep learning framework on AMD GPU |
+| PyTorch 2.9 + ROCm 7.0 | Deep learning on AMD GPU |
 | OpenCV | Image processing & visualization |
 | ByteTrack | Multi-object tracking |
-| AMD MI300X | Training hardware (192GB VRAM) |
-| VisDrone2019-DET | Aerial drone imagery dataset |
+| AMD MI300X | Training (192GB VRAM) |
+| VisDrone2019-DET | Aerial drone dataset |
 
 ---
 
